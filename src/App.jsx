@@ -1,103 +1,141 @@
-import { useState } from "react";
+"use strict";
 
-const CATALYST_DELETE_URL =
-  "https://litmos-admin-jobs-7006227804.development.catalystserverless.com.au/server/bulkDeleteUsers/";
+// Node 18+ has fetch built-in
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-function App() {
-  const [jobName, setJobName] = useState("ui_bulk_delete");
-  const [rawIds, setRawIds] = useState("");
-  const [running, setRunning] = useState(false);
-  const [result, setResult] = useState(null);
-  const [error, setError] = useState(null);
+// =======================
+// CONFIG
+// =======================
+const LITMOS_BASE_URL = "https://api.litmos.com.au/v1.svc";
+const RATE_DELAY_MS = parseInt(process.env.RATE_DELAY_MS || "700", 10);
+const MAX_RETRIES = parseInt(process.env.MAX_RETRIES || "2", 10);
 
-  const runDelete = async () => {
-    setError(null);
-    setResult(null);
+// =======================
+// CORS
+// =======================
+const CORS_HEADERS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type",
+};
 
-    const userIds = rawIds
-      .split(/\r?\n/)
-      .map((v) => v.trim())
-      .filter(Boolean);
+// =======================
+// MAIN HANDLER
+// =======================
+module.exports = async (req, res) => {
 
-    if (userIds.length === 0) {
-      setError("Paste at least one user ID.");
-      return;
+  // ---- Preflight ----
+  if (req.method === "OPTIONS") {
+    res.writeHead(204, CORS_HEADERS);
+    res.end();
+    return;
+  }
+
+  if (req.method !== "POST") {
+    res.writeHead(405, { ...CORS_HEADERS, "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+
+  try {
+    // ---- Parse body ----
+    const body =
+      typeof req.body === "string" ? JSON.parse(req.body) : req.body;
+
+    const jobName = body?.jobName;
+    const userIds = body?.userIds;
+
+    if (!jobName || typeof jobName !== "string") {
+      throw new Error("jobName is required");
     }
 
-    setRunning(true);
+    if (!Array.isArray(userIds) || userIds.length === 0) {
+      throw new Error("userIds must be a non-empty array");
+    }
 
-    try {
-      const res = await fetch(CATALYST_DELETE_URL, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          jobName,
-          userIds,
-        }),
-      });
+    const apiKey = process.env.LITMOS_API_KEY;
+    if (!apiKey) {
+      throw new Error("Missing LITMOS_API_KEY");
+    }
 
-      const data = await res.json();
+    const results = [];
+    let deleted = 0;
+    let failed = 0;
 
-      if (!res.ok) {
-        throw new Error(data.error || "Request failed");
+    // ---- Sequential delete with rate limiting ----
+    for (const userId of userIds) {
+      let attempt = 0;
+      let success = false;
+      let lastError = null;
+
+      while (attempt <= MAX_RETRIES && !success) {
+        attempt++;
+
+        try {
+          const response = await fetch(
+            `${LITMOS_BASE_URL}/users/${encodeURIComponent(userId)}?source=catalyst_bulk_delete`,
+            {
+              method: "DELETE",
+              headers: {
+                apikey: apiKey,
+              },
+            }
+          );
+
+          if (response.status === 200 || response.status === 204) {
+            success = true;
+            deleted++;
+            results.push({
+              userId,
+              status: "deleted",
+            });
+          } else {
+            lastError = `HTTP ${response.status}`;
+          }
+        } catch (err) {
+          lastError = err.message;
+        }
+
+        if (!success && attempt <= MAX_RETRIES) {
+          await sleep(RATE_DELAY_MS);
+        }
       }
 
-      setResult(data);
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setRunning(false);
+      if (!success) {
+        failed++;
+        results.push({
+          userId,
+          status: "failed",
+          reason: lastError,
+        });
+      }
+
+      await sleep(RATE_DELAY_MS);
     }
-  };
 
-  return (
-    <div style={{ maxWidth: 900, margin: "40px auto", fontFamily: "sans-serif" }}>
-      <h1>Litmos Bulk Delete (Admin)</h1>
+    // ---- Final response ----
+    const responseBody = {
+      status: "completed",
+      jobName,
+      totals: {
+        requested: userIds.length,
+        deleted,
+        failed,
+      },
+      results,
+    };
 
-      <label>
-        Job Name
-        <br />
-        <input
-          value={jobName}
-          onChange={(e) => setJobName(e.target.value)}
-          style={{ width: "100%", marginBottom: 12 }}
-        />
-      </label>
+    res.writeHead(200, {
+      ...CORS_HEADERS,
+      "Content-Type": "application/json",
+    });
+    res.end(JSON.stringify(responseBody));
 
-      <label>
-        User IDs (one per line)
-        <br />
-        <textarea
-          rows={12}
-          value={rawIds}
-          onChange={(e) => setRawIds(e.target.value)}
-          style={{ width: "100%", fontFamily: "monospace" }}
-        />
-      </label>
-
-      <br />
-
-      <button
-        onClick={runDelete}
-        disabled={running}
-        style={{ marginTop: 16, padding: "10px 20px" }}
-      >
-        {running ? "Running…" : "Run Delete Job"}
-      </button>
-
-      {error && (
-        <pre style={{ color: "red", marginTop: 20 }}>{error}</pre>
-      )}
-
-      {result && (
-        <pre style={{ marginTop: 20 }}>
-          {JSON.stringify(result, null, 2)}
-        </pre>
-      )}
-    </div>
-  );
-}
-
-export default App;
+  } catch (err) {
+    res.writeHead(400, {
+      ...CORS_HEADERS,
+      "Content-Type": "application/json",
+    });
+    res.end(JSON.stringify({ error: err.message }));
+  }
+};
