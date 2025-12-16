@@ -1,88 +1,76 @@
-"use strict";
+import { useState } from "react";
 
-const https = require("https");
+export default function App() {
+  const [jobName, setJobName] = useState("ui_bulk_delete");
+  const [userText, setUserText] = useState("");
+  const [result, setResult] = useState(null);
+  const [error, setError] = useState(null);
+  const [loading, setLoading] = useState(false);
 
-const RATE_DELAY_MS = Number(process.env.RATE_DELAY_MS || 700);
-const MAX_RETRIES = Number(process.env.MAX_RETRIES || 3);
-const LITMOS_API_KEY = process.env.LITMOS_API_KEY;
-const LITMOS_BASE_URL = "https://api.litmos.com.au/v1.svc/users";
+  const runDelete = async () => {
+    setError(null);
+    setResult(null);
 
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
+    const userIds = userText
+      .split("\n")
+      .map(v => v.trim())
+      .filter(Boolean);
 
-function deleteUser(userId, attempt = 1) {
-  return new Promise((resolve) => {
-    const req = https.request(
-      `${LITMOS_BASE_URL}/${userId}?source=bulk_delete`,
-      {
-        method: "DELETE",
-        headers: {
-          "apikey": LITMOS_API_KEY,
-          "Content-Type": "application/json"
-        }
-      },
-      res => {
-        if (res.statusCode === 200 || res.statusCode === 204) {
-          resolve({ userId, status: "deleted" });
-        } else if (res.statusCode >= 500 && attempt <= MAX_RETRIES) {
-          resolve(deleteUser(userId, attempt + 1));
-        } else {
-          resolve({
-            userId,
-            status: "failed",
-            reason: `HTTP ${res.statusCode}`
-          });
-        }
-      }
-    );
-
-    req.on("error", err => {
-      if (attempt <= MAX_RETRIES) {
-        resolve(deleteUser(userId, attempt + 1));
-      } else {
-        resolve({ userId, status: "failed", reason: err.message });
-      }
-    });
-
-    req.end();
-  });
-}
-
-module.exports = async (req, res) => {
-
-  /* ---------- CORS ---------- */
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-
-  if (req.method === "OPTIONS") {
-    res.writeHead(204);
-    return res.end();
-  }
-  /* -------------------------- */
-
-  if (req.method !== "POST") {
-    res.writeHead(405);
-    return res.end(JSON.stringify({ error: "Method not allowed" }));
-  }
-
-  let body = "";
-  req.on("data", chunk => body += chunk);
-
-  req.on("end", async () => {
-    let payload;
-
-    try {
-      payload = JSON.parse(body);
-    } catch {
-      res.writeHead(400);
-      return res.end(JSON.stringify({ error: "Invalid JSON" }));
+    if (userIds.length === 0) {
+      setError("No user IDs provided");
+      return;
     }
 
-    const { jobName, userIds } = payload;
+    setLoading(true);
 
-    if (!jobName || !Array.isArray(userIds) || userIds.length === 0) {
-      res.writeHead(400);
-      return res.end(JSON.stringify({
-        error: "job
+    try {
+      const res = await fetch(
+        import.meta.env.VITE_CATALYST_FUNCTION_URL,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ jobName, userIds })
+        }
+      );
+
+      const data = await res.json();
+      setResult(data);
+    } catch (err) {
+      setError("Failed to call delete service");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div style={{ padding: 24, fontFamily: "Arial" }}>
+      <h1>Litmos Bulk Delete (Admin)</h1>
+
+      <label>Job Name</label><br />
+      <input
+        value={jobName}
+        onChange={e => setJobName(e.target.value)}
+        style={{ width: 400 }}
+      /><br /><br />
+
+      <label>User IDs (one per line)</label><br />
+      <textarea
+        rows={12}
+        cols={60}
+        value={userText}
+        onChange={e => setUserText(e.target.value)}
+      /><br /><br />
+
+      <button onClick={runDelete} disabled={loading}>
+        {loading ? "Running…" : "Run Delete Job"}
+      </button>
+
+      {error && <p style={{ color: "red" }}>{error}</p>}
+      {result && (
+        <pre style={{ marginTop: 20 }}>
+          {JSON.stringify(result, null, 2)}
+        </pre>
+      )}
+    </div>
+  );
+}
